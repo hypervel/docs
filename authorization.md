@@ -1,0 +1,1192 @@
+# Authorization
+
+- [Introduction](#introduction)
+- [Gates](#gates)
+    - [Writing Gates](#writing-gates)
+    - [Authorizing Actions](#authorizing-actions-via-gates)
+    - [Gate Responses](#gate-responses)
+    - [Default Denial Responses](#default-denial-responses)
+    - [Intercepting Gate Checks](#intercepting-gate-checks)
+    - [Enum Abilities](#enum-abilities)
+    - [Inline Authorization](#inline-authorization)
+- [Creating Policies](#creating-policies)
+    - [Generating Policies](#generating-policies)
+    - [Registering Policies](#registering-policies)
+- [Writing Policies](#writing-policies)
+    - [Policy Methods](#policy-methods)
+    - [Policy Responses](#policy-responses)
+    - [Methods Without Models](#methods-without-models)
+    - [Guest Users](#guest-users)
+    - [Policy Filters](#policy-filters)
+    - [Query-Aware Policies](#query-aware-policies)
+    - [Testing Query-Aware Policies](#testing-query-aware-policies)
+- [Authorizing Actions Using Policies](#authorizing-actions-using-policies)
+    - [Via the User Model](#via-the-user-model)
+    - [Via the Gate Facade](#via-the-gate-facade)
+    - [Via Middleware](#via-middleware)
+    - [Via Blade Templates](#via-blade-templates)
+    - [Supplying Additional Context](#supplying-additional-context)
+- [Authorization & Inertia](#authorization-and-inertia)
+- [Events](#events)
+
+<a name="introduction"></a>
+## Introduction
+
+In addition to providing built-in [authentication](/docs/{{version}}/authentication) services, Hypervel also provides a simple way to authorize user actions against a given resource. For example, even though a user is authenticated, they may not be authorized to update or delete certain Eloquent models or database records managed by your application. Hypervel's authorization features provide an easy, organized way of managing these types of authorization checks.
+
+Hypervel provides two primary ways of authorizing actions: [gates](#gates) and [policies](#creating-policies). Think of gates and policies like routes and controllers. Gates provide a simple, closure-based approach to authorization while policies, like controllers, group logic around a particular model or resource. In this documentation, we'll explore gates first and then examine policies.
+
+You do not need to choose between exclusively using gates or exclusively using policies when building an application. Most applications will most likely contain some mixture of gates and policies, and that is perfectly fine! Gates are most applicable to actions that are not related to any model or resource, such as viewing an administrator dashboard. In contrast, policies should be used when you wish to authorize an action for a particular model or resource.
+
+<a name="gates"></a>
+## Gates
+
+<a name="writing-gates"></a>
+### Writing Gates
+
+> [!WARNING]
+> Gates are a great way to learn the basics of Hypervel's authorization features; however, when building robust Hypervel applications you should consider using [policies](#creating-policies) to organize your authorization rules.
+
+Gates are simply closures that determine if a user is authorized to perform a given action. Typically, gates are defined within the `boot` method of the `App\Providers\AppServiceProvider` class using the `Gate` facade. Gates always receive a user instance as their first argument and may optionally receive additional arguments such as a relevant Eloquent model.
+
+In this example, we'll define a gate to determine if a user can update a given `App\Models\Post` model. The gate will accomplish this by comparing the user's `id` against the `user_id` of the user that created the post:
+
+```php
+use App\Models\Post;
+use App\Models\User;
+use Hypervel\Support\Facades\Gate;
+
+/**
+ * Bootstrap any application services.
+ */
+public function boot(): void
+{
+    Gate::define('update-post', function (User $user, Post $post) {
+        return $user->id === $post->user_id;
+    });
+}
+```
+
+Like controllers, gates may also be defined using a class callback array:
+
+```php
+use App\Policies\PostPolicy;
+use Hypervel\Support\Facades\Gate;
+
+/**
+ * Bootstrap any application services.
+ */
+public function boot(): void
+{
+    Gate::define('update-post', [PostPolicy::class, 'update']);
+}
+```
+
+<a name="authorizing-actions-via-gates"></a>
+### Authorizing Actions
+
+To authorize an action using gates, you should use the `allows` or `denies` methods provided by the `Gate` facade. Note that you are not required to pass the currently authenticated user to these methods. Hypervel will automatically take care of passing the user into the gate closure. It is typical to call the gate authorization methods within your application's controllers before performing an action that requires authorization:
+
+```php
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Models\Post;
+use Hypervel\Http\RedirectResponse;
+use Hypervel\Http\Request;
+use Hypervel\Support\Facades\Gate;
+
+class PostController extends Controller
+{
+    /**
+     * Update the given post.
+     */
+    public function update(Request $request, Post $post): RedirectResponse
+    {
+        if (! Gate::allows('update-post', $post)) {
+            abort(403);
+        }
+
+        // Update the post...
+
+        return redirect('/posts');
+    }
+}
+```
+
+If you would like to determine if a user other than the currently authenticated user is authorized to perform an action, you may use the `forUser` method on the `Gate` facade:
+
+```php
+if (Gate::forUser($user)->allows('update-post', $post)) {
+    // The user can update the post...
+}
+
+if (Gate::forUser($user)->denies('update-post', $post)) {
+    // The user can't update the post...
+}
+```
+
+You may authorize multiple actions at a time using the `any` or `none` methods:
+
+```php
+if (Gate::any(['update-post', 'delete-post'], $post)) {
+    // The user can update or delete the post...
+}
+
+if (Gate::none(['update-post', 'delete-post'], $post)) {
+    // The user can't update or delete the post...
+}
+```
+
+<a name="authorizing-or-throwing-exceptions"></a>
+#### Authorizing or Throwing Exceptions
+
+If you would like to attempt to authorize an action and automatically throw an `Hypervel\Auth\Access\AuthorizationException` if the user is not allowed to perform the given action, you may use the `Gate` facade's `authorize` method. Instances of `AuthorizationException` are automatically converted to a 403 HTTP response by Hypervel:
+
+```php
+Gate::authorize('update-post', $post);
+
+// The action is authorized...
+```
+
+<a name="gates-supplying-additional-context"></a>
+#### Supplying Additional Context
+
+The gate methods for authorizing abilities (`allows`, `denies`, `check`, `any`, `none`, `authorize`, `can`, `cannot`) and the authorization [Blade directives](#via-blade-templates) (`@can`, `@cannot`, `@canany`) can receive an array as their second argument. These array elements are passed as parameters to the gate closure, and can be used for additional context when making authorization decisions:
+
+```php
+use App\Models\Category;
+use App\Models\User;
+use Hypervel\Support\Facades\Gate;
+
+Gate::define('create-post', function (User $user, Category $category, bool $pinned) {
+    if (! $user->canPublishToGroup($category->group)) {
+        return false;
+    } elseif ($pinned && ! $user->canPinPosts()) {
+        return false;
+    }
+
+    return true;
+});
+
+if (Gate::check('create-post', [$category, $pinned])) {
+    // The user can create the post...
+}
+```
+
+<a name="gate-responses"></a>
+### Gate Responses
+
+So far, we have only examined gates that return simple boolean values. However, sometimes you may wish to return a more detailed response, including an error message. To do so, you may return an `Hypervel\Auth\Access\Response` from your gate:
+
+```php
+use App\Models\User;
+use Hypervel\Auth\Access\Response;
+use Hypervel\Support\Facades\Gate;
+
+Gate::define('edit-settings', function (User $user) {
+    return $user->isAdmin
+        ? Response::allow()
+        : Response::deny('You must be an administrator.');
+});
+```
+
+Even when you return an authorization response from your gate, the `Gate::allows` method will still return a simple boolean value; however, you may use the `Gate::inspect` method to get the full authorization response returned by the gate:
+
+```php
+$response = Gate::inspect('edit-settings');
+
+if ($response->allowed()) {
+    // The action is authorized...
+} else {
+    echo $response->message();
+}
+```
+
+When using the `Gate::authorize` method, which throws an `AuthorizationException` if the action is not authorized, the error message provided by the authorization response will be propagated to the HTTP response:
+
+```php
+Gate::authorize('edit-settings');
+
+// The action is authorized...
+```
+
+<a name="customizing-gate-response-status"></a>
+#### Customizing The HTTP Response Status
+
+When an action is denied via a Gate, a `403` HTTP response is returned; however, it can sometimes be useful to return an alternative HTTP status code. You may customize the HTTP status code returned for a failed authorization check using the `denyWithStatus` static constructor on the `Hypervel\Auth\Access\Response` class:
+
+```php
+use App\Models\User;
+use Hypervel\Auth\Access\Response;
+use Hypervel\Support\Facades\Gate;
+
+Gate::define('edit-settings', function (User $user) {
+    return $user->isAdmin
+        ? Response::allow()
+        : Response::denyWithStatus(404);
+});
+```
+
+Because hiding resources via a `404` response is such a common pattern for web applications, the `denyAsNotFound` method is offered for convenience:
+
+```php
+use App\Models\User;
+use Hypervel\Auth\Access\Response;
+use Hypervel\Support\Facades\Gate;
+
+Gate::define('edit-settings', function (User $user) {
+    return $user->isAdmin
+        ? Response::allow()
+        : Response::denyAsNotFound();
+});
+```
+
+<a name="default-denial-responses"></a>
+### Default Denial Responses
+
+When a gate or policy returns `false`, Hypervel will convert the denial into a generic `Response::deny()` instance. If you would like to customize the response used for these plain boolean denials, you may define a default denial response using the `Gate::defaultDenialResponse` method:
+
+```php
+use Hypervel\Auth\Access\Response;
+use Hypervel\Support\Facades\Gate;
+
+Gate::defaultDenialResponse(
+    Response::denyWithStatus(404, 'This resource was not found.')
+);
+```
+
+The default denial response is only used when the authorization callback returns `false`. If your gate or policy returns an explicit `Response` instance, Hypervel will use that response instead.
+
+<a name="intercepting-gate-checks"></a>
+### Intercepting Gate Checks
+
+Sometimes, you may wish to grant all abilities to a specific user. You may use the `before` method to define a closure that is run before all other authorization checks:
+
+```php
+use App\Models\User;
+use Hypervel\Support\Facades\Gate;
+
+Gate::before(function (User $user, string $ability) {
+    if ($user->isAdministrator()) {
+        return true;
+    }
+});
+```
+
+If the `before` closure returns a non-null result that result will be considered the result of the authorization check.
+
+You may use the `after` method to define a closure to be executed after all other authorization checks:
+
+```php
+use App\Models\User;
+use Hypervel\Auth\Access\Response;
+use Hypervel\Support\Facades\Gate;
+
+Gate::after(function (User $user, string $ability, bool|Response|null $result, array $arguments) {
+    if ($user->isAdministrator()) {
+        return true;
+    }
+});
+```
+
+Values returned by `after` closures will not override the result of the authorization check unless the gate or policy returned `null`.
+
+<a name="enum-abilities"></a>
+### Enum Abilities
+
+Hypervel's gate, route, and middleware authorization APIs accept PHP enum cases. Backed enums use their backing value, while unit enums use their case name:
+
+```php
+use App\Models\Post;
+use App\Models\User;
+use Hypervel\Support\Facades\Gate;
+
+enum Ability: string
+{
+    case UpdatePost = 'update-post';
+}
+
+Gate::define(Ability::UpdatePost, function (User $user, Post $post) {
+    return $user->id === $post->user_id;
+});
+
+if (Gate::allows(Ability::UpdatePost, $post)) {
+    // The user can update the post...
+}
+```
+
+The user model's `can` and `cannot` helpers also accept enum cases.
+
+<a name="inline-authorization"></a>
+### Inline Authorization
+
+Occasionally, you may wish to determine if the currently authenticated user is authorized to perform a given action without writing a dedicated gate that corresponds to the action. Hypervel allows you to perform these types of "inline" authorization checks via the `Gate::allowIf` and `Gate::denyIf` methods. Inline authorization does not execute any defined ["before" or "after" authorization hooks](#intercepting-gate-checks):
+
+```php
+use App\Models\User;
+use Hypervel\Support\Facades\Gate;
+
+Gate::allowIf(fn (User $user) => $user->isAdministrator());
+
+Gate::denyIf(fn (User $user) => $user->banned());
+```
+
+If the action is not authorized or if no user is currently authenticated, Hypervel will automatically throw an `Hypervel\Auth\Access\AuthorizationException` exception. Instances of `AuthorizationException` are automatically converted to a 403 HTTP response by Hypervel's exception handler.
+
+<a name="creating-policies"></a>
+## Creating Policies
+
+<a name="generating-policies"></a>
+### Generating Policies
+
+Policies are classes that organize authorization logic around a particular model or resource. For example, if your application is a blog, you may have an `App\Models\Post` model and a corresponding `App\Policies\PostPolicy` to authorize user actions such as creating or updating posts.
+
+You may generate a policy using the `make:policy` Artisan command. The generated policy will be placed in the `app/Policies` directory. If this directory does not exist in your application, Hypervel will create it for you:
+
+```shell
+php artisan make:policy PostPolicy
+```
+
+The `make:policy` command will generate an empty policy class. If you would like to generate a class with example policy methods related to viewing, creating, updating, and deleting the resource, you may provide a `--model` option when executing the command:
+
+```shell
+php artisan make:policy PostPolicy --model=Post
+```
+
+<a name="registering-policies"></a>
+### Registering Policies
+
+<a name="policy-discovery"></a>
+#### Policy Discovery
+
+By default, Hypervel automatically discovers policies as long as the model and policy follow standard Hypervel naming conventions. Specifically, the policies must be in a `Policies` directory at or above the directory that contains your models. So, for example, the models may be placed in the `app/Models` directory while the policies may be placed in the `app/Policies` directory. In this situation, Hypervel will check for policies in `app/Models/Policies` then `app/Policies`. In addition, the policy name must match the model name and have a `Policy` suffix. So, a `User` model would correspond to a `UserPolicy` policy class.
+
+If you would like to define your own policy discovery logic, you may register a custom policy discovery callback using the `Gate::guessPolicyNamesUsing` method. Typically, this method should be called from the `boot` method of your application's `AppServiceProvider`:
+
+```php
+use Hypervel\Support\Facades\Gate;
+
+Gate::guessPolicyNamesUsing(function (string $modelClass) {
+    // Return the name of the policy class for the given model...
+});
+```
+
+<a name="manually-registering-policies"></a>
+#### Manually Registering Policies
+
+Using the `Gate` facade, you may manually register policies and their corresponding models within the `boot` method of your application's `AppServiceProvider`:
+
+```php
+use App\Models\Order;
+use App\Policies\OrderPolicy;
+use Hypervel\Support\Facades\Gate;
+
+/**
+ * Bootstrap any application services.
+ */
+public function boot(): void
+{
+    Gate::policy(Order::class, OrderPolicy::class);
+}
+```
+
+Alternatively, you may place the `UsePolicy` attribute on a model class to inform Hypervel of the model's corresponding policy:
+
+```php
+<?php
+
+namespace App\Models;
+
+use App\Policies\OrderPolicy;
+use Hypervel\Database\Eloquent\Attributes\UsePolicy;
+use Hypervel\Database\Eloquent\Model;
+
+#[UsePolicy(OrderPolicy::class)]
+class Order extends Model
+{
+    //
+}
+```
+
+<a name="writing-policies"></a>
+## Writing Policies
+
+<a name="policy-methods"></a>
+### Policy Methods
+
+Once the policy class has been registered, you may add methods for each action it authorizes. For example, let's define an `update` method on our `PostPolicy` which determines if a given `App\Models\User` can update a given `App\Models\Post` instance.
+
+The `update` method will receive a `User` and a `Post` instance as its arguments, and should return `true` or `false` indicating whether the user is authorized to update the given `Post`. So, in this example, we will verify that the user's `id` matches the `user_id` on the post:
+
+```php
+<?php
+
+namespace App\Policies;
+
+use App\Models\Post;
+use App\Models\User;
+
+class PostPolicy
+{
+    /**
+     * Determine if the given post can be updated by the user.
+     */
+    public function update(User $user, Post $post): bool
+    {
+        return $user->id === $post->user_id;
+    }
+}
+```
+
+You may continue to define additional methods on the policy as needed for the various actions it authorizes. For example, you might define `view` or `delete` methods to authorize various `Post` related actions, but remember you are free to give your policy methods any name you like.
+
+If you used the `--model` option when generating your policy via the Artisan console, it will already contain methods for the `viewAny`, `view`, `create`, `update`, `delete`, `restore`, and `forceDelete` actions.
+
+> [!NOTE]
+> All policies are resolved via the Hypervel [service container](/docs/{{version}}/container), allowing you to type-hint any needed dependencies in the policy's constructor to have them automatically injected.
+
+<a name="policy-responses"></a>
+### Policy Responses
+
+So far, we have only examined policy methods that return simple boolean values. However, sometimes you may wish to return a more detailed response, including an error message. To do so, you may return an `Hypervel\Auth\Access\Response` instance from your policy method:
+
+```php
+use App\Models\Post;
+use App\Models\User;
+use Hypervel\Auth\Access\Response;
+
+/**
+ * Determine if the given post can be updated by the user.
+ */
+public function update(User $user, Post $post): Response
+{
+    return $user->id === $post->user_id
+        ? Response::allow()
+        : Response::deny('You do not own this post.');
+}
+```
+
+When returning an authorization response from your policy, the `Gate::allows` method will still return a simple boolean value; however, you may use the `Gate::inspect` method to get the full authorization response returned by the gate:
+
+```php
+use Hypervel\Support\Facades\Gate;
+
+$response = Gate::inspect('update', $post);
+
+if ($response->allowed()) {
+    // The action is authorized...
+} else {
+    echo $response->message();
+}
+```
+
+When using the `Gate::authorize` method, which throws an `AuthorizationException` if the action is not authorized, the error message provided by the authorization response will be propagated to the HTTP response:
+
+```php
+Gate::authorize('update', $post);
+
+// The action is authorized...
+```
+
+<a name="customizing-policy-response-status"></a>
+#### Customizing the HTTP Response Status
+
+When an action is denied via a policy method, a `403` HTTP response is returned; however, it can sometimes be useful to return an alternative HTTP status code. You may customize the HTTP status code returned for a failed authorization check using the `denyWithStatus` static constructor on the `Hypervel\Auth\Access\Response` class:
+
+```php
+use App\Models\Post;
+use App\Models\User;
+use Hypervel\Auth\Access\Response;
+
+/**
+ * Determine if the given post can be updated by the user.
+ */
+public function update(User $user, Post $post): Response
+{
+    return $user->id === $post->user_id
+        ? Response::allow()
+        : Response::denyWithStatus(404);
+}
+```
+
+Because hiding resources via a `404` response is such a common pattern for web applications, the `denyAsNotFound` method is offered for convenience:
+
+```php
+use App\Models\Post;
+use App\Models\User;
+use Hypervel\Auth\Access\Response;
+
+/**
+ * Determine if the given post can be updated by the user.
+ */
+public function update(User $user, Post $post): Response
+{
+    return $user->id === $post->user_id
+        ? Response::allow()
+        : Response::denyAsNotFound();
+}
+```
+
+<a name="methods-without-models"></a>
+### Methods Without Models
+
+Some policy methods only receive an instance of the currently authenticated user. This situation is most common when authorizing `create` actions. For example, if you are creating a blog, you may wish to determine if a user is authorized to create any posts at all. In these situations, your policy method should only expect to receive a user instance:
+
+```php
+/**
+ * Determine if the given user can create posts.
+ */
+public function create(User $user): bool
+{
+    return $user->role === 'writer';
+}
+```
+
+<a name="guest-users"></a>
+### Guest Users
+
+By default, all gates and policies automatically return `false` if the incoming HTTP request was not initiated by an authenticated user. However, you may allow these authorization checks to pass through to your gates and policies by declaring an "optional" type-hint or supplying a `null` default value for the user argument definition:
+
+```php
+<?php
+
+namespace App\Policies;
+
+use App\Models\Post;
+use App\Models\User;
+
+class PostPolicy
+{
+    /**
+     * Determine if the given post can be updated by the user.
+     */
+    public function update(?User $user, Post $post): bool
+    {
+        return $user?->id === $post->user_id;
+    }
+}
+```
+
+<a name="policy-filters"></a>
+### Policy Filters
+
+For certain users, you may wish to authorize all actions within a given policy. To accomplish this, define a `before` method on the policy. The `before` method will be executed before any other methods on the policy, giving you an opportunity to authorize the action before the intended policy method is actually called. This feature is most commonly used for authorizing application administrators to perform any action:
+
+```php
+use App\Models\User;
+
+/**
+ * Perform pre-authorization checks.
+ */
+public function before(User $user, string $ability): bool|null
+{
+    if ($user->isAdministrator()) {
+        return true;
+    }
+
+    return null;
+}
+```
+
+If you would like to deny all authorization checks for a particular type of user then you may return `false` from the `before` method. If `null` is returned, the authorization check will fall through to the policy method.
+
+> [!WARNING]
+> The `before` method of a policy class will not be called if the class doesn't contain a method with a name matching the name of the ability being checked.
+
+<a name="query-aware-policies"></a>
+### Query-Aware Policies
+
+Sometimes, you may need to apply an authorization rule to a database query instead of a single model instance. For example, you may want an index page to only retrieve posts the current user is allowed to edit. Hypervel supports query-aware policy methods for this purpose.
+
+For a single model, or a small number of models already loaded into memory, use normal policy checks. Use `whereCan` when the database should filter a list to only authorized rows. Use `withCan` when every row in a list needs boolean authorization attributes for actions such as editing or deleting.
+
+Begin with the normal per-model policy method, then define a matching method using the ability name followed by `Scope`. The scope method receives the authenticated user and an Eloquent query builder:
+
+```php
+<?php
+
+namespace App\Policies;
+
+use App\Models\Post;
+use App\Models\User;
+use Hypervel\Database\Eloquent\Builder;
+
+class PostPolicy
+{
+    /**
+     * Determine if the user can edit the given post.
+     */
+    public function edit(User $user, Post $post): bool
+    {
+        return $user->id === $post->user_id;
+    }
+
+    /**
+     * Filter posts the user can edit.
+     */
+    public function editScope(User $user, Builder $query): Builder
+    {
+        if ($user->isAdministrator()) {
+            return $query;
+        }
+
+        return $query->where($query->qualifyColumn('user_id'), $user->id);
+    }
+}
+```
+
+The scope defines set membership: it should add the constraints that identify authorized model keys and return the exact builder it receives. Returning another builder is not supported.
+
+When a policy scope adds a join, `whereCan` applies that join directly to the query being built. Select the model's own columns to prevent joined columns from being hydrated onto the model or replacing attributes with the same name:
+
+```php
+$posts = Post::query()
+    ->select('posts.*')
+    ->whereCan('collaborate')
+    ->get();
+```
+
+You do not need to do this with `withCan`, since its joined policy scope runs inside the authorization subquery and does not change the model's selected columns.
+
+You may use the `whereCan` method to filter a query with the current user's policy scope:
+
+```php
+use App\Models\Post;
+
+$posts = Post::whereCan('edit')->paginate();
+
+$publishedPosts = Post::query()
+    ->where('published', true)
+    ->whereCan('edit')
+    ->latest()
+    ->get();
+```
+
+You may also check the query from another user's perspective by passing that user as the second argument:
+
+```php
+$posts = Post::query()->whereCan('edit', $user)->get();
+```
+
+Omitting the user or passing `null` uses the current authenticated user. A non-null user is applied only to that builder method call. Query-aware methods accept string and enum abilities. If an ability contains dashes, Hypervel converts it to camel case when determining the policy method name, so `edit-post` calls `editPostScope`.
+
+You may chain multiple `whereCan` calls. Each call adds another required policy condition:
+
+```php
+$posts = Post::query()
+    ->whereCan('edit', $user)
+    ->whereCan('publish', $user)
+    ->get();
+```
+
+<a name="adding-authorization-attributes"></a>
+#### Adding Authorization Attributes
+
+The `withCan` method adds strict boolean authorization attributes to the models returned by a query. Hypervel can derive these values from the same policy scope:
+
+```php
+$posts = Post::query()->withCan('edit')->get();
+
+foreach ($posts as $post) {
+    $post->can_edit; // true or false
+}
+```
+
+You may request several abilities at once and give selected results an explicit alias:
+
+```php
+$posts = Post::query()
+    ->withCan([
+        'edit',
+        'delete',
+        'publish as publishable',
+    ], $user)
+    ->get();
+
+$posts->first()->can_edit;
+$posts->first()->can_delete;
+$posts->first()->publishable;
+```
+
+Normal model attributes remain selected. Authorization attributes are cast to strict booleans, including nullable SQL results, which become `false`.
+
+By default, the attribute name begins with `can_` and the ability is converted to snake case. For example, `edit-post` and `editPost` both produce `can_edit_post`. Explicit aliases must begin with a letter or underscore and contain only ASCII letters, numbers, and underscores. Attribute names may not exceed 63 bytes. If a generated name is too long, provide a shorter explicit alias. Duplicate aliases within one `withCan` call are rejected before the query is changed.
+
+<a name="custom-query-policy-select-methods"></a>
+#### Custom Select Methods
+
+When `withCan` uses a policy scope method, such as `editScope`, it adds a subquery for that ability to the same database query. Sometimes, you may want to optimize this query by defining the corresponding select policy method, such as `editSelect`, that calculates the authorization result more directly. A select policy method may also be useful when the authorization rule depends on the query being built. It must return one nullable boolean value for the outer row as either a database expression contract or a base query builder:
+
+```php
+<?php
+
+namespace App\Policies;
+
+use App\Models\User;
+use Hypervel\Database\Eloquent\Builder as EloquentBuilder;
+use Hypervel\Database\Query\Builder as QueryBuilder;
+
+class PostPolicy
+{
+    /**
+     * Select whether the user can edit each post.
+     */
+    public function editSelect(User $user, EloquentBuilder $query): QueryBuilder
+    {
+        return $query->getQuery()->newQuery()->selectRaw(
+            $query->qualifyColumn('user_id') . ' = ?',
+            [$user->getAuthIdentifier()],
+        );
+    }
+}
+```
+
+The base query builder carries SQL bindings, so runtime values should be passed as bindings instead of interpolated into SQL. An implementation may return `Hypervel\Contracts\Database\Query\Expression` when its expression needs no runtime value bindings.
+
+`whereCan` prefers the scope policy method for the ability, such as `editScope`, and falls back to the corresponding select policy method, such as `editSelect`. `withCan` prefers the select policy method and otherwise derives the result from the scope policy method. When a policy defines both methods, `whereCan` uses the scope method and `withCan` uses the select method. If the preferred method does not accept guests, Hypervel denies the operation instead of trying the other method.
+
+<a name="advanced-query-policy-composition"></a>
+#### Advanced Query Composition
+
+The `Gate::scope` and `Gate::select` methods provide the lower-level operations used by `whereCan` and `withCan`. They are useful when composing a query that the fluent methods do not directly cover:
+
+```php
+use App\Models\Post;
+use Hypervel\Support\Facades\Gate;
+
+$query = Post::query();
+
+Gate::scope('edit', $query);
+
+$selection = Gate::select('edit', $query);
+```
+
+Both methods use the same symmetric fallback behavior as the fluent builder methods.
+
+<a name="query-aware-policy-behavior"></a>
+#### Query-Aware Policy Behavior
+
+Gate `before` callbacks and policy `before` methods are honored once for each query-aware operation. Returning `true` leaves a filtered query unmodified or produces a boolean `true` selection. Returning `false` filters out every row or produces a boolean `false` selection. A policy `before` method receives the builder's model prototype, not the model row being authorized. That prototype is not always blank because model-instance shorthand and custom builders may carry state.
+
+Gate `after` callbacks are not run. Query-aware operations return a point-in-time boolean query result, not a final authorization `Response`, so they do not include a denial message or status. Use a normal per-model authorization check when the application needs that response information.
+
+When `withCan` derives a selection from a policy scope, the outer query controls row visibility. The correlated inner authorization query excludes global-scope constraints but keeps extensions installed by those scopes. For example, an outer query using `withTrashed` may include a deleted post and still annotate it as authorized, while a policy scope may call the retained `withTrashed` extension.
+
+Scope-derived selections require a model with a single primary key. Composite model keys are not supported by Eloquent. The scope must remain a set-membership query on the builder it receives. Use an explicit select policy method, such as `editSelect`, when authorization depends on a replacement query, a union, a limit or offset window, result ordering, or an outer query whose `from` clause aliases the model table.
+
+<a name="testing-query-aware-policies"></a>
+### Testing Query-Aware Policies
+
+When using query-aware policies, you should test that your query-level authorization matches your per-model policy method. Hypervel provides the `Hypervel\Testing\Concerns\AssertsPolicyQueryConsistency` trait for this purpose.
+
+The `assertWhereCanMatchesPolicy` method verifies that `whereCan` returns the same row set as checking each model individually with `Gate::allows`. This also verifies that a select policy method, such as `editSelect`, can be used for filtering when no scope policy method is defined:
+
+```php
+use App\Models\Post;
+use App\Models\User;
+use Hypervel\Testing\Concerns\AssertsPolicyQueryConsistency;
+use Tests\TestCase;
+
+class PostPolicyTest extends TestCase
+{
+    use AssertsPolicyQueryConsistency;
+
+    public function test_edit_query_matches_policy(): void
+    {
+        $user = User::factory()->create();
+        $posts = Post::factory()->count(3)->create();
+
+        $this->assertWhereCanMatchesPolicy(
+            'edit',
+            Post::query(),
+            $posts,
+            $user,
+        );
+    }
+}
+```
+
+The `assertWithCanMatchesPolicy` method verifies that `withCan` produces the same strict boolean result for each row. This also verifies that `withCan` can derive its result from a scope policy method, such as `editScope`, when no select policy method is defined:
+
+```php
+public function test_edit_annotation_matches_policy(): void
+{
+    $user = User::factory()->create();
+    $posts = Post::factory()->count(3)->create();
+
+    $this->assertWithCanMatchesPolicy(
+        'edit',
+        Post::query(),
+        $posts,
+        $user,
+        'can_edit',
+    );
+}
+```
+
+The user argument is optional. Omit it or pass `null` to test against the current authenticated user. The assertions and builder macros use the Gate instance captured when the application booted. Register test policies on that Gate, such as with `Gate::policy(Post::class, PostPolicy::class)`, instead of replacing the Gate container binding after the provider has booted.
+
+<a name="authorizing-actions-using-policies"></a>
+## Authorizing Actions Using Policies
+
+<a name="via-the-user-model"></a>
+### Via the User Model
+
+The `App\Models\User` model that is included with your Hypervel application includes two helpful methods for authorizing actions: `can` and `cannot`. The `can` and `cannot` methods receive the name of the action you wish to authorize and the relevant model. For example, let's determine if a user is authorized to update a given `App\Models\Post` model. Typically, this will be done within a controller method:
+
+```php
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Models\Post;
+use Hypervel\Http\RedirectResponse;
+use Hypervel\Http\Request;
+
+class PostController extends Controller
+{
+    /**
+     * Update the given post.
+     */
+    public function update(Request $request, Post $post): RedirectResponse
+    {
+        if ($request->user()->cannot('update', $post)) {
+            abort(403);
+        }
+
+        // Update the post...
+
+        return redirect('/posts');
+    }
+}
+```
+
+If a [policy is registered](#registering-policies) for the given model, the `can` method will automatically call the appropriate policy and return the boolean result. If no policy is registered for the model, the `can` method will attempt to call the closure-based Gate matching the given action name.
+
+<a name="user-model-actions-that-dont-require-models"></a>
+#### Actions That Don't Require Models
+
+Remember, some actions may correspond to policy methods like `create` that do not require a model instance. In these situations, you may pass a class name to the `can` method. The class name will be used to determine which policy to use when authorizing the action:
+
+```php
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Models\Post;
+use Hypervel\Http\RedirectResponse;
+use Hypervel\Http\Request;
+
+class PostController extends Controller
+{
+    /**
+     * Create a post.
+     */
+    public function store(Request $request): RedirectResponse
+    {
+        if ($request->user()->cannot('create', Post::class)) {
+            abort(403);
+        }
+
+        // Create the post...
+
+        return redirect('/posts');
+    }
+}
+```
+
+<a name="via-the-gate-facade"></a>
+### Via the `Gate` Facade
+
+In addition to helpful methods provided to the `App\Models\User` model, you can always authorize actions via the `Gate` facade's `authorize` method.
+
+Like the `can` method, this method accepts the name of the action you wish to authorize and the relevant model. If the action is not authorized, the `authorize` method will throw an `Hypervel\Auth\Access\AuthorizationException` exception which the Hypervel exception handler will automatically convert to an HTTP response with a 403 status code:
+
+```php
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Models\Post;
+use Hypervel\Http\RedirectResponse;
+use Hypervel\Http\Request;
+use Hypervel\Support\Facades\Gate;
+
+class PostController extends Controller
+{
+    /**
+     * Update the given blog post.
+     *
+     * @throws \Hypervel\Auth\Access\AuthorizationException
+     */
+    public function update(Request $request, Post $post): RedirectResponse
+    {
+        Gate::authorize('update', $post);
+
+        // The current user can update the blog post...
+
+        return redirect('/posts');
+    }
+}
+```
+
+<a name="controller-actions-that-dont-require-models"></a>
+#### Actions That Don't Require Models
+
+As previously discussed, some policy methods like `create` do not require a model instance. In these situations, you should pass a class name to the `authorize` method. The class name will be used to determine which policy to use when authorizing the action:
+
+```php
+use App\Models\Post;
+use Hypervel\Http\RedirectResponse;
+use Hypervel\Http\Request;
+use Hypervel\Support\Facades\Gate;
+
+/**
+ * Create a new blog post.
+ *
+ * @throws \Hypervel\Auth\Access\AuthorizationException
+ */
+public function create(Request $request): RedirectResponse
+{
+    Gate::authorize('create', Post::class);
+
+    // The current user can create blog posts...
+
+    return redirect('/posts');
+}
+```
+
+<a name="via-middleware"></a>
+### Via Middleware
+
+Hypervel includes a middleware that can authorize actions before the incoming request even reaches your routes or controllers. By default, the `Hypervel\Auth\Middleware\Authorize` middleware may be attached to a route using the `can` [middleware alias](/docs/{{version}}/middleware#middleware-aliases), which is automatically registered by Hypervel. Let's explore an example of using the `can` middleware to authorize that a user can update a post:
+
+```php
+use App\Models\Post;
+
+Route::put('/post/{post}', function (Post $post) {
+    // The current user may update the post...
+})->middleware('can:update,post');
+```
+
+In this example, we're passing the `can` middleware two arguments. The first is the name of the action we wish to authorize and the second is the route parameter we wish to pass to the policy method. In this case, since we are using [implicit model binding](/docs/{{version}}/routing#implicit-binding), an `App\Models\Post` model will be passed to the policy method. If the user is not authorized to perform the given action, an HTTP response with a 403 status code will be returned by the middleware.
+
+You may also use the `Authorize::using` method to build the middleware string:
+
+```php
+use App\Models\Post;
+use Hypervel\Auth\Middleware\Authorize;
+
+Route::put('/post/{post}', function (Post $post) {
+    // The current user may update the post...
+})->middleware(Authorize::using('update', 'post'));
+```
+
+For convenience, you may also attach the `can` middleware to your route using the `can` method:
+
+```php
+use App\Models\Post;
+
+Route::put('/post/{post}', function (Post $post) {
+    // The current user may update the post...
+})->can('update', 'post');
+```
+
+The `can` method and `Authorize::using` method also accept enum cases:
+
+```php
+use App\Enums\Ability;
+use App\Models\Post;
+
+Route::put('/post/{post}', function (Post $post) {
+    // The current user may update the post...
+})->can(Ability::UpdatePost, 'post');
+```
+
+If you are using [controller middleware attributes](/docs/{{version}}/controllers#middleware-attributes), you may apply the `can` middleware via the `Authorize` attribute:
+
+```php
+use Hypervel\Routing\Attributes\Controllers\Authorize;
+
+#[Authorize('update', 'post')]
+public function update(Post $post)
+{
+    // The current user may update the post...
+}
+```
+
+<a name="middleware-actions-that-dont-require-models"></a>
+#### Actions That Don't Require Models
+
+Again, some policy methods like `create` do not require a model instance. In these situations, you may pass a class name to the middleware. The class name will be used to determine which policy to use when authorizing the action:
+
+```php
+Route::post('/post', function () {
+    // The current user may create posts...
+})->middleware('can:create,App\Models\Post');
+```
+
+Specifying the entire class name within a string middleware definition can become cumbersome. For that reason, you may choose to attach the `can` middleware to your route using the `can` method:
+
+```php
+use App\Models\Post;
+
+Route::post('/post', function () {
+    // The current user may create posts...
+})->can('create', Post::class);
+```
+
+<a name="via-blade-templates"></a>
+### Via Blade Templates
+
+When writing Blade templates, you may wish to display a portion of the page only if the user is authorized to perform a given action. For example, you may wish to show an update form for a blog post only if the user can actually update the post. In this situation, you may use the `@can` and `@cannot` directives:
+
+```blade
+@can('update', $post)
+    <!-- The current user can update the post... -->
+@elsecan('create', App\Models\Post::class)
+    <!-- The current user can create new posts... -->
+@else
+    <!-- ... -->
+@endcan
+
+@cannot('update', $post)
+    <!-- The current user cannot update the post... -->
+@elsecannot('create', App\Models\Post::class)
+    <!-- The current user cannot create new posts... -->
+@endcannot
+```
+
+These directives are convenient shortcuts for writing `@if` and `@unless` statements. The `@can` and `@cannot` statements above are equivalent to the following statements:
+
+```blade
+@if (Auth::user()->can('update', $post))
+    <!-- The current user can update the post... -->
+@endif
+
+@unless (Auth::user()->can('update', $post))
+    <!-- The current user cannot update the post... -->
+@endunless
+```
+
+You may also determine if a user is authorized to perform any action from a given array of actions. To accomplish this, use the `@canany` directive:
+
+```blade
+@canany(['update', 'view', 'delete'], $post)
+    <!-- The current user can update, view, or delete the post... -->
+@elsecanany(['create'], \App\Models\Post::class)
+    <!-- The current user can create a post... -->
+@endcanany
+```
+
+<a name="blade-actions-that-dont-require-models"></a>
+#### Actions That Don't Require Models
+
+Like most of the other authorization methods, you may pass a class name to the `@can` and `@cannot` directives if the action does not require a model instance:
+
+```blade
+@can('create', App\Models\Post::class)
+    <!-- The current user can create posts... -->
+@endcan
+
+@cannot('create', App\Models\Post::class)
+    <!-- The current user can't create posts... -->
+@endcannot
+```
+
+<a name="supplying-additional-context"></a>
+### Supplying Additional Context
+
+When authorizing actions using policies, you may pass an array as the second argument to the various authorization functions and helpers. The first element in the array will be used to determine which policy should be invoked, while the rest of the array elements are passed as parameters to the policy method and can be used for additional context when making authorization decisions. For example, consider the following `PostPolicy` method definition which contains an additional `$category` parameter:
+
+```php
+/**
+ * Determine if the given post can be updated by the user.
+ */
+public function update(User $user, Post $post, int $category): bool
+{
+    return $user->id === $post->user_id &&
+           $user->canUpdateCategory($category);
+}
+```
+
+When attempting to determine if the authenticated user can update a given post, we can invoke this policy method like so:
+
+```php
+/**
+ * Update the given blog post.
+ *
+ * @throws \Hypervel\Auth\Access\AuthorizationException
+ */
+public function update(Request $request, Post $post): RedirectResponse
+{
+    Gate::authorize('update', [$post, $request->category]);
+
+    // The current user can update the blog post...
+
+    return redirect('/posts');
+}
+```
+
+<a name="authorization-and-inertia"></a>
+## Authorization & Inertia
+
+Although authorization must always be handled on the server, it can often be convenient to provide your frontend application with authorization data in order to properly render your application's UI. Hypervel does not define a required convention for exposing authorization information to an Inertia powered frontend.
+
+However, if you are using one of Hypervel's Inertia-based [starter kits](/docs/{{version}}/starter-kits), your application already contains a `HandleInertiaRequests` middleware. Within this middleware's `share` method, you may return shared data that will be provided to all Inertia pages in your application. This shared data can serve as a convenient location to define authorization information for the user:
+
+```php
+<?php
+
+namespace App\Http\Middleware;
+
+use App\Models\Post;
+use Hypervel\Http\Request;
+use Hypervel\Inertia\Middleware;
+
+class HandleInertiaRequests extends Middleware
+{
+    // ...
+
+    /**
+     * Define the props that are shared by default.
+     *
+     * @return array<string, mixed>
+     */
+    public function share(Request $request): array
+    {
+        return [
+            ...parent::share($request),
+            'auth' => [
+                'user' => $request->user(),
+                'permissions' => [
+                    'post' => [
+                        'create' => $request->user()->can('create', Post::class),
+                    ],
+                ],
+            ],
+        ];
+    }
+}
+```
+
+<a name="events"></a>
+## Events
+
+Hypervel dispatches the `Hypervel\Auth\Access\Events\GateEvaluated` event after a gate or policy check is evaluated. This event receives the user being evaluated, the ability name, the result of the authorization check, and the arguments passed to the gate:
+
+```php
+use Hypervel\Auth\Access\Events\GateEvaluated;
+
+public function handle(GateEvaluated $event): void
+{
+    // $event->user
+    // $event->ability
+    // $event->result
+    // $event->arguments
+}
+```
+
+Inline authorization checks performed with `Gate::allowIf` or `Gate::denyIf` do not dispatch this event because they bypass the normal gate and policy pipeline.
