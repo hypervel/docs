@@ -608,7 +608,7 @@ PhpRedis does not support pipelining on Redis Cluster connections. Pipelining re
 <a name="advanced-helpers"></a>
 ### Advanced Helpers
 
-If you need to stream keys with Redis' `SCAN` command, use `safeScan` while holding a pooled connection. The `safeScan` method handles PhpRedis' `OPT_PREFIX` behavior by adding the prefix to the scan pattern and removing it from returned keys:
+If you need to stream keys with Redis' `SCAN` command, use `safeScan` while holding a pooled connection. The `safeScan` method applies your configured prefix exactly once, including when PhpRedis' `SCAN_PREFIX` option is enabled, and removes it from returned keys:
 
 ```php
 use Hypervel\Redis\RedisConnection;
@@ -618,6 +618,8 @@ $keys = Redis::withConnection(function (RedisConnection $connection): array {
     return iterator_to_array($connection->safeScan('users:*'));
 }, transform: false);
 ```
+
+The `SCAN_PREFIX` option also prefixes hash-field and set-member patterns. To scan these without prefixing the pattern, wrap the scan calls in `$connection->withoutScanPrefix($callback)` inside `withConnection`. Key prefixing is unchanged, and scan options are restored when the callback finishes.
 
 The `evalWithShaCache` method executes a Lua script using `evalSha` and automatically falls back to `eval` when Redis has not cached the script yet:
 

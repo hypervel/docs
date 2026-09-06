@@ -3304,6 +3304,17 @@ $reserved = $queue->allReservedJobs();
 
 These methods load every matching job into memory. Avoid using them against very large backlogs in latency-sensitive code.
 
+To count jobs across every queue on a database, Redis, or Beanstalkd connection, use the `totalSize`, `totalPendingSize`, `totalDelayedSize`, and `totalReservedSize` methods:
+
+```php
+$total = $queue->totalSize();
+$pending = $queue->totalPendingSize();
+$delayed = $queue->totalDelayedSize();
+$reserved = $queue->totalReservedSize();
+```
+
+The total includes pending, delayed, and reserved jobs. Beanstalkd's buried jobs are excluded.
+
 <a name="monitoring-your-queues"></a>
 ## Monitoring Your Queues
 
