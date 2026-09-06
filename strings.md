@@ -1943,6 +1943,14 @@ $string = Str::ucwords('hypervel framework');
 // Hypervel Framework
 ```
 
+You may pass custom word separators as the second argument:
+
+```php
+$string = Str::ucwords('hypervel-framework', '-');
+
+// Hypervel-Framework
+```
+
 <a name="method-str-upper"></a>
 #### `Str::upper()` {.collection-method}
 
@@ -4085,6 +4093,14 @@ use Hypervel\Support\Str;
 $string = Str::of('hypervel framework')->ucwords();
 
 // Hypervel Framework
+```
+
+You may pass custom word separators to the method:
+
+```php
+$string = Str::of('hypervel-framework')->ucwords('-');
+
+// Hypervel-Framework
 ```
 
 <a name="method-fluent-str-unwrap"></a>
