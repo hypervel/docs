@@ -1453,6 +1453,12 @@ To instruct the `random` method to return to generating random strings normally,
 Str::createRandomStringsNormally();
 ```
 
+You may reset the random string, UUID, and ULID factories together using the `resetFactoryState` method:
+
+```php
+Str::resetFactoryState();
+```
+
 <a name="method-str-remove"></a>
 #### `Str::remove()` {.collection-method}
 
@@ -2118,7 +2124,7 @@ The `Str::wordWrap` method wraps a string to a given number of characters:
 ```php
 use Hypervel\Support\Str;
 
-$text = "The quick brown fox jumped over the lazy dog."
+$text = "The quick brown fox jumped over the lazy dog.";
 
 Str::wordWrap($text, characters: 20, break: "<br />\n");
 
