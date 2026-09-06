@@ -2607,6 +2607,12 @@ You may include the `-v` flag when invoking the `queue:work` command if you woul
 php artisan queue:work -v
 ```
 
+The command also reports worker stop reasons, such as reaching the memory limit. To output job updates and stop information as JSON, use the `--json` option:
+
+```shell
+php artisan queue:work --json
+```
+
 Remember, queue workers are long-lived processes and store the booted application state in memory. As a result, they will not notice changes in your code base after they have been started. So, during your deployment process, be sure to [restart your queue workers](#queue-workers-and-deployment). In addition, remember that any static state created or modified by your application will not be automatically reset between jobs. Request or job specific state should be stored in `CoroutineContext` instead of static properties or mutable singletons.
 
 Alternatively, you may run the `queue:listen` command. When using the `queue:listen` command, you don't have to manually restart the worker when you want to reload your updated code or reset the application state; however, this command is significantly less efficient than the `queue:work` command:
