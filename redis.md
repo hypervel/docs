@@ -120,6 +120,9 @@ A non-zero `read_timeout` is applied both when the Redis socket is opened and as
 
 The `context` option accepts stream options directly or nested under an `ssl` or `stream` key. If you need to configure PhpRedis options such as `prefix`, `scan`, `serializer`, `compression`, `compression_level`, `tcp_keepalive`, or `pack_ignore_numbers`, add them to the `options` array. The `pack_ignore_numbers` option requires PhpRedis 6.2 or later and applies to standalone and Cluster connections. Connection options override shared options, while a non-null top-level connection `prefix` takes final precedence.
 
+> [!WARNING]
+> PhpRedis 6.3.0 crashes when `tcp_keepalive` is applied to a Redis Cluster connection; leave this option unset for Cluster connections when using that version.
+
 <a name="retry-and-backoff-configuration"></a>
 #### Retry and Backoff Configuration
 
@@ -608,7 +611,7 @@ PhpRedis does not support pipelining on Redis Cluster connections. Pipelining re
 <a name="advanced-helpers"></a>
 ### Advanced Helpers
 
-If you need to stream keys with Redis' `SCAN` command, use `safeScan` while holding a pooled connection. The `safeScan` method applies your configured prefix exactly once, including when PhpRedis' `SCAN_PREFIX` option is enabled, and removes it from returned keys:
+If you need to stream keys with Redis' `SCAN` command, use `safeScan` while holding a pooled connection. Pass a logical key pattern without adding the connection prefix, just as you would pass a key to `get`. The `safeScan` method adds the connection prefix, including when PhpRedis' `SCAN_PREFIX` option is enabled, and removes it from returned keys:
 
 ```php
 use Hypervel\Redis\RedisConnection;

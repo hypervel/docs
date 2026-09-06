@@ -204,6 +204,8 @@ If your Redis queue connection uses a [Redis Cluster](https://redis.io/docs/late
 
 You may still include your own hash tag, such as `{mail}:high`, when you need several queue names to share a specific Redis Cluster slot. Hypervel leaves explicit hash tags unchanged.
 
+On standalone Redis, or when supplying an explicit Cluster hash tag, avoid queue names ending in `:delayed`, `:reserved`, or `:notify`, which overlap with the queue driver's storage keys. Automatically tagged Cluster queue names do not have this restriction.
+
 <a name="blocking"></a>
 ##### Blocking
 
